@@ -19,7 +19,30 @@ docker build -f Dockerfile.5090 -t personaplex:5090 .
 ```
 
 ## Deploy with Portainer
-[Include the YAML stack here]
+version: '3.8'
+
+services:
+  personaplex:
+    image: personaplex:5090
+    container_name: personaplex
+    ports:
+      - "8998:8998"
+    environment:
+      - HF_TOKEN=yourtokenhere
+      - NO_TORCH_COMPILE=1
+    volumes:
+      - personaplex-data:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  personaplex-data:
 
 ## Credits
 - NVIDIA PersonaPlex: https://github.com/NVIDIA/personaplex
