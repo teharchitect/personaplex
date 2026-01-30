@@ -44,6 +44,6 @@ services:
 volumes:
   personaplex-data:
 
-## Credits
+## Credits 
 - NVIDIA PersonaPlex: https://github.com/NVIDIA/personaplex
 - Built with help from Claude (Anthropic)
