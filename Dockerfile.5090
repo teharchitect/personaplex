@@ -1,0 +1,133 @@
+# Stage 1: Build PyTorch from source with sm_120 support
+FROM nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu24.04 AS pytorch-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build dependencies and Python 3.13
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    wget \
+    ca-certificates \
+    libssl-dev \
+    libffi-dev \
+    python3.13 \
+    python3.13-dev \
+    python3.13-venv \
+    libopenblas-dev \
+    ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pip for Python 3.13
+RUN wget https://bootstrap.pypa.io/get-pip.py && \
+    python3.13 get-pip.py && \
+    rm get-pip.py
+
+# Set Python 3.13 as default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 1 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.13 1
+
+# Clone PyTorch
+WORKDIR /opt
+RUN git clone --recursive https://github.com/pytorch/pytorch && \
+    cd pytorch && \
+    git checkout main && \
+    git submodule sync && \
+    git submodule update --init --recursive
+
+# Build PyTorch with sm_120 support for RTX 5090
+WORKDIR /opt/pytorch
+ENV TORCH_CUDA_ARCH_LIST="8.6;9.0;12.0"
+ENV TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
+ENV CMAKE_PREFIX_PATH="$(dirname $(which python3))/../"
+ENV USE_CUDA=1
+ENV USE_CUDNN=1
+ENV USE_MKLDNN=1
+ENV BUILD_TEST=0
+ENV MAX_JOBS=4
+
+RUN python3 -m pip install -r requirements.txt && \
+    python3 -m pip install mkl mkl-include && \
+    python3 setup.py install
+
+# Build torchvision
+WORKDIR /opt
+RUN git clone https://github.com/pytorch/vision.git torchvision && \
+    cd torchvision && \
+    python3 setup.py install
+
+# Build torchaudio
+RUN git clone https://github.com/pytorch/audio.git torchaudio && \
+    cd torchaudio && \
+    python3 -m pip install -r requirements.txt && \
+    python3 setup.py install
+
+# Find and mark the actual site-packages location
+RUN python3 -c "import site; print(site.getsitepackages()[0])" > /tmp/site_packages_path.txt
+
+# Stage 2: PersonaPlex with custom PyTorch
+FROM nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu24.04 AS personaplex
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install runtime dependencies and Python 3.13
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    pkg-config \
+    libopus-dev \
+    libopenblas0 \
+    python3.13 \
+    python3.13-dev \
+    python3.13-venv \
+    git \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pip for Python 3.13
+RUN wget https://bootstrap.pypa.io/get-pip.py && \
+    python3.13 get-pip.py && \
+    rm get-pip.py
+
+# Set Python 3.13 as default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 1 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.13 1
+
+# Get the site-packages path and copy PyTorch
+COPY --from=pytorch-builder /tmp/site_packages_path.txt /tmp/
+RUN SITE_PKG=$(cat /tmp/site_packages_path.txt) && mkdir -p $SITE_PKG
+COPY --from=pytorch-builder /usr/local/lib/python3.13/ /usr/local/lib/python3.13/
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+WORKDIR /app/moshi/
+
+# Copy PersonaPlex code
+COPY moshi/ /app/moshi/
+
+# Create venv and install dependencies
+RUN uv venv /app/moshi/.venv --python 3.13
+
+# Install dependencies but exclude torch, torchvision, torchaudio (already installed)
+RUN uv sync --no-install-package torch --no-install-package torchvision --no-install-package torchaudio
+
+# Link our custom PyTorch into the venv
+RUN ln -s /usr/local/lib/python3.13/dist-packages/torch /app/moshi/.venv/lib/python3.13/site-packages/torch && \
+    ln -s /usr/local/lib/python3.13/dist-packages/torchvision /app/moshi/.venv/lib/python3.13/site-packages/torchvision && \
+    ln -s /usr/local/lib/python3.13/dist-packages/torchaudio /app/moshi/.venv/lib/python3.13/site-packages/torchaudio
+
+RUN mkdir -p /app/ssl
+
+EXPOSE 8998
+
+ENV NO_TORCH_COMPILE=1
+
+CMD ["/app/moshi/.venv/bin/python", "-m", "moshi.server", "--ssl", "/app/ssl"]
